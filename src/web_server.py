@@ -271,22 +271,27 @@ def api_get_sessions(account: Optional[str] = Query(None)):
 @app.get("/api/messages")
 def api_get_messages(
     account: Optional[str] = Query(None),
-    chat_id: str = Query(..., description="好友wxid或群聊chatroom id"),
+    chat_id: Optional[str] = Query(None, description="好友wxid或群聊chatroom id"),
+    username: Optional[str] = Query(None, description="兼容参数"),
     limit: int = Query(50, ge=1, le=200),
 ):
     """获取指定会话的历史消息（按时间升序）"""
+    target_id = chat_id or username
+    if not target_id:
+        raise HTTPException(status_code=400, detail="缺少必填参数 chat_id 或 username")
+
     reader = get_reader_for_account(account)
     if not reader:
         raise HTTPException(status_code=404, detail="微信账号未挂载")
 
     try:
-        raw_msgs = reader.db.get_messages(chat_id, limit=limit)
+        raw_msgs = reader.db.get_messages(target_id, limit=limit)
     except Exception as e:
-        print(f"[API] 读取会话 {chat_id} 历史记录失败: {e}", flush=True)
+        print(f"[API] 读取会话 {target_id} 历史记录失败: {e}", flush=True)
         raw_msgs = []
 
-    is_group = chat_id.endswith("@chatroom")
-    chat_title = reader.get_display_name(chat_id)
+    is_group = target_id.endswith("@chatroom")
+    chat_title = reader.get_display_name(target_id)
     out_msgs = []
 
     for r in raw_msgs:
@@ -370,6 +375,7 @@ def api_get_messages(
             "create_time": r.get("create_time", 0),
             "sort_seq": sort_seq,
             "text": clean_text,
+            "content": clean_text,
             "media": media,
         })
 

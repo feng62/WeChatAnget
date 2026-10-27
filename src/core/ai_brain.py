@@ -307,9 +307,22 @@ class AIBrain:
                 context_lines.append(f"{prefix}: {turn['content']}")
 
         context_str = "\n".join(context_lines) if context_lines else "（暂无历史记录）"
-        user_prompt = f"【当前联系人】: {sender_name or '对方'}\n【近期聊天记录】:\n{context_str}\n\n【最新收到的消息】: \"{incoming_text}\""
+        user_prompt = f"【当前联系人】: {sender_name or '对方'}\n【近期聊天记录】:\n{context_str}\n\n【最近一条消息】: \"{incoming_text}\""
         if custom_instruction:
             user_prompt += f"\n【副驾驶微调意图/回复要求】: {custom_instruction}"
+
+        # 判断最后一条发言者，精准定制策略
+        is_last_from_me = False
+        if history_messages and isinstance(history_messages, list) and history_messages:
+            last_m = history_messages[-1]
+            is_last_from_me = bool(last_m.get("is_from_me") or last_m.get("direction") == "outgoing")
+
+        if is_last_from_me:
+            role_hint = "【特别指导】：当前聊天的最后一条消息是由「我」发出的，对方尚未回复。请基于前面的对话脉络，提供 3 种高质量的「后续跟进、补充说明、推进事项进展或温馨确认」建议，严禁机械重复打招呼或说'你好'！"
+        else:
+            role_hint = "【特别指导】：对方发来了上述最新消息。请结合上下文，针对对方的内容提供 3 种高情商、自然得体的微信回复建议，直接针对核心事项回答，避免无意义的'你好'打招呼开场白。"
+
+        user_prompt += f"\n\n{role_hint}"
 
         try:
             content = self.call_llm([

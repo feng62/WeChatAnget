@@ -438,7 +438,8 @@ class AICopilotWorker(QThread):
         try:
             latest_text = ""
             if self.context_msgs:
-                latest_text = self.context_msgs[-1].get("content") or ""
+                latest_m = self.context_msgs[-1]
+                latest_text = latest_m.get("content") or latest_m.get("text") or ""
 
             # 调用大模型深度多轮综合分析
             res = self.brain.generate_copilot_analysis(
@@ -1086,18 +1087,21 @@ class WeChatCopilotDock(QWidget):
 
     def refresh_sessions_list(self):
         try:
-            resp = requests.get("http://127.0.0.1:8000/api/sessions", timeout=1.0)
+            resp = requests.get("http://127.0.0.1:8000/api/sessions", timeout=2.5)
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
-                self.populate_sessions(data)
-                return
-        except Exception:
-            pass
+                if data:
+                    self.populate_sessions(data)
+                    return
+        except Exception as e:
+            print(f"[CopilotDock] 获取会话列表异常: {e}", flush=True)
 
-        mock_sessions = [
-            {"username": "filehelper", "title": "文件传输助手", "is_group": False, "latest_msg": "欢迎使用微信 AI 对话副驾驶"},
-        ]
-        self.populate_sessions(mock_sessions)
+        self.session_combo.blockSignals(True)
+        self.session_combo.clear()
+        self.session_combo.addItem("⚠️ 未检测到活跃会话 (请先启动 run_web_ui.bat)", None)
+        self.session_combo.blockSignals(False)
+        self.last_msg_box.setText("（请先启动 Web 控制台并登录微信）")
+        self.intent_lbl.setText("💡 意图洞察: 等待连接微信会话数据...")
 
     def populate_sessions(self, sessions: List[Dict]):
         self.sessions_cache = sessions
@@ -1137,8 +1141,8 @@ class WeChatCopilotDock(QWidget):
         try:
             resp = requests.get(
                 "http://127.0.0.1:8000/api/messages",
-                params={"username": chat_id, "limit": 20},
-                timeout=1.0,
+                params={"chat_id": chat_id, "username": chat_id, "limit": 25},
+                timeout=2.5,
             )
             if resp.status_code == 200:
                 msgs = resp.json().get("data", [])
@@ -1146,23 +1150,29 @@ class WeChatCopilotDock(QWidget):
                 self.msg_count_lbl.setText(f"已注入近 {len(msgs)} 条多轮上下文")
                 if msgs:
                     latest = msgs[-1]
-                    spk = "我" if latest.get("is_from_me") else (latest.get("sender_name") or "对方")
-                    self.last_msg_box.setText(f"{spk}: {latest.get('content', '...')}")
+                    spk = "我" if latest.get("is_from_me") else (latest.get("sender_name") or self.current_session.get("title") or "对方")
+                    content_preview = latest.get("content") or latest.get("text") or "..."
+                    self.last_msg_box.setText(f"{spk}: {content_preview}")
+                    if self.auto_toggle.isChecked():
+                        self.trigger_generation()
                 else:
-                    self.last_msg_box.setText("（暂无近期消息）")
-
-                if self.auto_toggle.isChecked() and msgs:
-                    self.trigger_generation()
+                    self.last_msg_box.setText("（该会话暂无历史聊天记录）")
+                    self.intent_lbl.setText("💡 意图洞察: 暂无聊天记录，可输入要求生成开场或推进建议")
+                    if self.auto_toggle.isChecked():
+                        self.trigger_generation()
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[CopilotDock] 加载历史记录异常: {e}", flush=True)
 
-        self.recent_messages = [
-            {"is_from_me": False, "sender_name": "对方", "content": self.current_session.get("latest_msg", "你好呀")}
-        ]
-        self.last_msg_box.setText(f"对方: {self.current_session.get('latest_msg', '你好')}")
-        if self.auto_toggle.isChecked():
-            self.trigger_generation()
+        latest_text = (self.current_session or {}).get("latest_msg") or ""
+        if latest_text:
+            self.recent_messages = [{"is_from_me": False, "sender_name": (self.current_session or {}).get("title", "对方"), "content": latest_text}]
+            self.last_msg_box.setText(f"最新消息: {latest_text}")
+            if self.auto_toggle.isChecked():
+                self.trigger_generation()
+        else:
+            self.recent_messages = []
+            self.last_msg_box.setText("（暂无近期消息记录）")
 
     def clear_cards(self):
         while self.cards_layout.count() > 1:
