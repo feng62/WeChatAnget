@@ -247,6 +247,50 @@ class MessageSender:
         except Exception as e:
             return False, f"发送失败: {e}"
 
+    def paste_to_chat(
+        self,
+        text: str,
+        target_name: str = "",
+        hwnd: Optional[int] = None,
+        force_search: bool = False,
+    ) -> Tuple[bool, str]:
+        """
+        向微信目标会话粘贴文本，但不模拟按 Enter，供用户人工复核与微调后再发送。
+        """
+        if not hwnd:
+            hwnd = self.find_wechat_window()
+        if not hwnd:
+            return False, "未找到微信主窗口"
+
+        try:
+            self.bring_wechat_to_foreground(hwnd)
+            cfg = load_ai_settings()
+            clean_target = target_name.strip()
+
+            if clean_target and (force_search or cfg.get("search_before_send", True)):
+                if clean_target != self.last_chat_target:
+                    self._tap_key(VK_F, with_ctrl=True)
+                    time.sleep(0.08)
+                    self._tap_key(VK_A, with_ctrl=True)
+                    time.sleep(0.04)
+                    self._tap_key(VK_DELETE)
+                    time.sleep(0.04)
+                    self._set_clipboard(clean_target)
+                    time.sleep(0.04)
+                    self._tap_key(VK_V, with_ctrl=True)
+                    search_delay = max(0.4, float(cfg.get("search_delay_ms", 400)) / 1000.0 + 0.25)
+                    time.sleep(search_delay)
+                    self._tap_key(VK_RETURN)
+                    time.sleep(0.5)
+
+            self._set_clipboard(text)
+            time.sleep(0.05)
+            self._tap_key(VK_V, with_ctrl=True)
+            self.last_chat_target = clean_target
+            return True, "已成功填入微信输入框"
+        except Exception as e:
+            return False, f"填入失败: {e}"
+
     def send_to_active_chat(self, text: str, hwnd: Optional[int] = None) -> Tuple[bool, str]:
         """向当前活动聊天框直接发送消息（向下兼容）"""
         return self.send_to_chat(text, target_name="", hwnd=hwnd, force_search=False)

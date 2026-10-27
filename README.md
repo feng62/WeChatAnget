@@ -31,9 +31,11 @@ WeChatAnget/
 ├── config.example.json         # 配置文件示例 (复制为 config.json 后修改)
 ├── run_web_ui.bat              # Web 控制台一键启动脚本 (原生 ANSI 编码)
 ├── run_message_monitor.bat     # 终端纯 CLI 消息监听脚本
+├── run_copilot_dock.bat        # 桌面贴边伴随助手启动脚本 (毫秒级丝滑吸附)
 │
 ├── src/                        # Python 核心源码目录
 │   ├── web_server.py           # FastAPI + WebSocket WebUI 服务端
+│   ├── copilot_dock.py         # 微信右侧贴边伴随副驾驶窗口 (PyQt6 + Win32 Hook)
 │   ├── demo_read_messages.py   # CLI 消息增量监控与转码演示
 │   └── core/                   # 核心业务模块包
 │       ├── __init__.py
@@ -82,6 +84,7 @@ copy data\ai_settings.example.json data\ai_settings.json
 ```
 
 ### 3. 一键启动
+* **启动桌面贴边伴随助手**：双击运行 `run_copilot_dock.bat`，窗口自动吸附在微信右侧，支持消息搜索与 3 种风格 AI 智能回复。
 * **启动 Web 智能控制台**：双击运行 `run_web_ui.bat`，浏览器访问 `http://127.0.0.1:8000`。
 * **启动纯命令行监控**：双击运行 `run_message_monitor.bat`。
 
