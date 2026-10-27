@@ -1,0 +1,61 @@
+# ==========================================
+# Python Bytecode & Packaging
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+
+# ==========================================
+# Virtual Environments
+# ==========================================
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ==========================================
+# Frontend Node.js Dependencies & Logs
+# ==========================================
+frontend/node_modules/
+frontend/.pnpm-store/
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+# ==========================================
+# Sensitive Configuration & API Keys
+# ==========================================
+config.json
+data/ai_settings.json
+data/persona.json
+data/whitelist.json
+
+# ==========================================
+# WeChat Decrypted DB, Chat History, Logs, Media
+# ==========================================
+data/db_cache/
+data/memory/
+data/*.db
+data/*.sqlite*
+media-cache/
+wechatauto_logs/
+
+# ==========================================
+# Editor & OS Artifacts
+# ==========================================
+.idea/
+.vscode/
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db

@@ -1,0 +1,10 @@
+{
+  "comment": "微信 4.x 本地消息读取与媒体处理配置文件模板",
+  "dbDir": "",
+  "pollInterval": 0.4,
+  "mediaCacheDir": "media-cache",
+  "ignoreSelf": false,
+  "skipOlderThanSec": 15.0,
+  "staleAfterSec": 30.0,
+  "duplicateWindowSec": 45.0
+}

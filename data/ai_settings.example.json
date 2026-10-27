@@ -1,0 +1,20 @@
+{
+  "provider": "deepseek",
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "YOUR_API_KEY_HERE",
+  "model": "deepseek-chat",
+  "temperature": 0.75,
+  "max_tokens": 600,
+  "auto_reply_global": true,
+  "group_at_only": false,
+  "reply_cooldown_sec": 3,
+  "auto_extract_memory": true,
+  "context_messages_count": 15,
+  "search_before_send": true,
+  "search_delay_ms": 400,
+  "private_debounce_sec": 3.0,
+  "group_debounce_sec": 6.0,
+  "multi_bubble_enabled": true,
+  "max_bubbles_count": 2,
+  "bubble_send_interval_ms": 800
+}
