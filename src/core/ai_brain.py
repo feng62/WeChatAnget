@@ -253,6 +253,110 @@ class AIBrain:
 
         return self._offline_suggestions(incoming_text, custom_instruction)
 
+    def generate_copilot_analysis(
+        self,
+        chat_id: str,
+        incoming_text: str,
+        sender_name: str = "",
+        custom_instruction: str = "",
+        history_messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        微信副驾驶专属：深度分析近 15~20 轮上下文，输出意图洞察 + 3 种风格回复建议。
+        """
+        cfg = load_ai_settings()
+        api_key = (cfg.get("api_key") or "").strip()
+        context_count = int(cfg.get("context_messages_count", 15))
+
+        if not api_key:
+            return {
+                "intent": f"（离线模拟）对方正在与你交流日常话题",
+                "suggestions": self._offline_suggestions(incoming_text, custom_instruction),
+            }
+
+        persona = load_persona()
+        system_prompt = build_system_prompt()
+        memory_block = self.memory.build_memory_prompt_block(chat_id, sender_name)
+        if memory_block:
+            system_prompt += f"\n\n{memory_block}"
+
+        max_words = persona.get("max_words", 100)
+        system_prompt += f"""\n
+【微信副驾驶 - 深度意图洞察与分风格回复任务】：
+请你以副驾驶专家视角，深入审视分析用户与联系人「{sender_name or '对方'}」的多轮聊天历史与上文脉络。
+完成以下两项任务：
+1. 【意图洞察】：用 1 句话（不超过30字）精准提炼出「对方的核心诉求、关注重点及当前的情绪态度」；
+2. 【3 种风格回复建议】：基于当前人设身份及已知记忆事实，生成 3 种最佳微信自然口吻回复（单条限 {max_words} 字内）：
+   - [得体] 自然温暖、得体周全、极具情商
+   - [幽默] 轻松风趣、带点俏皮互动、活跃气氛
+   - [精简] 言简意赅、短小精干、清晰了当
+
+【输出格式要求】（必须严格按照下列格式输出 4 行，严禁包含任何前缀或开场白）：
+[洞察] 对方的核心诉求与情绪态度洞察总结
+[得体] 得体回复内容
+[幽默] 幽默回复内容
+[精简] 精简回复内容"""
+
+        # 整理上下文消息
+        context_lines = []
+        if history_messages and isinstance(history_messages, list):
+            sliced = history_messages[-context_count:]
+            db_turns = self.format_chat_history_messages(sliced)
+            for turn in db_turns[-12:]:
+                prefix = "对方/群友" if turn["role"] == "user" else "我"
+                context_lines.append(f"{prefix}: {turn['content']}")
+
+        context_str = "\n".join(context_lines) if context_lines else "（暂无历史记录）"
+        user_prompt = f"【当前联系人】: {sender_name or '对方'}\n【近期聊天记录】:\n{context_str}\n\n【最新收到的消息】: \"{incoming_text}\""
+        if custom_instruction:
+            user_prompt += f"\n【副驾驶微调意图/回复要求】: {custom_instruction}"
+
+        try:
+            content = self.call_llm([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ], max_tokens=450)
+
+            intent_summary = ""
+            suggestions = []
+            for line in content.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("[洞察]") or line.startswith("【洞察】"):
+                    intent_summary = line[4:].strip().lstrip(":：、 ")
+                else:
+                    m = re.match(r"^\[?(得体|幽默|精简|正式|礼貌|调侃|风趣|干练)\]?[\s:：、]*(.*)$", line)
+                    if m:
+                        style_name = m.group(1)
+                        if style_name in ("得体", "正式", "礼貌"):
+                            full_style = "得体礼貌"
+                            tag = "得体"
+                        elif style_name in ("幽默", "调侃", "风趣"):
+                            full_style = "风趣幽默"
+                            tag = "幽默"
+                        else:
+                            full_style = "精简高效"
+                            tag = "精简"
+                        suggestions.append({"style": full_style, "tag": tag, "text": m.group(2).strip()})
+
+            if not intent_summary:
+                intent_summary = f"正在与「{sender_name or '对方'}」进行微信多轮对话沟通"
+
+            if len(suggestions) < 2:
+                suggestions = self._offline_suggestions(incoming_text, custom_instruction)
+
+            return {
+                "intent": intent_summary,
+                "suggestions": suggestions[:3],
+            }
+        except Exception as e:
+            print(f"[AIBrain] generate_copilot_analysis 异常: {e}", flush=True)
+            return {
+                "intent": f"与「{sender_name or '对方'}」的日常交流",
+                "suggestions": self._offline_suggestions(incoming_text, custom_instruction),
+            }
+
     def _offline_suggestions(self, msg: str, instruction: str = "") -> List[Dict[str, str]]:
         """离线模式下的情境回复模板"""
         if instruction:

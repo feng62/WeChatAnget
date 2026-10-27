@@ -3,15 +3,12 @@
 微信 4.x 桌面 AI 副驾驶 - 贴边伴随助手 (PyQt6 + Win32 零延迟硬件级吸附)
 
 核心特性：
-1. 丝滑吸附：基于 Windows Event Hook (EVENT_OBJECT_LOCATIONCHANGE) 纳秒级响应，
-   彻底解决高频 QTimer 轮询导致的拖拽卡顿、掉帧与画面撕裂；
-2. 状态全同步：微信最小化 -> 伴随窗自动隐身；微信恢复/移动 -> 瞬时贴合右侧；
-3. 智能防越界：右侧贴边或全屏时自动切至左侧或内嵌吸附；
-4. 共享 Web 端大脑与配置：直接复用 src.core (AI 配置、记忆库、人设 System Prompt、消息池)；
-5. 可搜索会话下拉框：支持按好友/群聊拼音汉字实时模糊搜索过滤会话；
-6. 3 种微信口吻 AI 建议卡片（得体、幽默、精炼），支持「一键发送」、「填入微信」与「复制」；
-7. 遵循微信 4.x 原生设计语言（WeChat Light Theme + Emerald #07c160 强调色）；
-8. WebSocket 全双工实时同步：实时感知微信新消息推送并自动触发生成。
+1. 丝滑吸附：基于 Windows Event Hook (EVENT_OBJECT_LOCATIONCHANGE) 纳秒级响应，彻底解决拖拽卡顿掉帧；
+2. 深度意图洞察：直接调用 AIBrain 分析近 15~20 轮上下文，自动生成「对方核心意图与情绪洞察总结」；
+3. 3 种微信高情商建议卡片：得体礼貌、风趣幽默、精简高效，支持一键发送、填入微信与复制；
+4. 快捷键极速发送：支持按 Ctrl+1 / Ctrl+2 / Ctrl+3 盲操直发对应卡片；
+5. 快捷意图微调胶囊：内置高情商委婉、幽默打趣、委婉拒绝、预约确认等一键预设标签，秒换意图生成；
+6. 微信原生 UI 规范：WeChat Light Theme + Emerald #07c160 强调色，原生视觉质感。
 """
 
 import asyncio
@@ -19,6 +16,7 @@ import ctypes
 from ctypes import wintypes
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -48,8 +46,10 @@ from PyQt6.QtGui import (
     QFont,
     QIcon,
     QKeyEvent,
+    QKeySequence,
     QPainter,
     QPen,
+    QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -119,6 +119,15 @@ WX_CLASS_KEYWORDS = ("Qt51514QWindowIcon", "Qt5", "WeChatMainWndForPC")
 WX_TITLE_KEYWORDS = ("微信", "WeChat")
 WX_PROCESS_NAMES = ("weixin.exe", "wechat.exe")
 
+PRESET_CHIPS = [
+    ("🌿 高情商委婉", "高情商、态度温和周全、顾及对方感受与情绪"),
+    ("😄 幽默打趣", "轻松风趣、带点俏皮互动调侃、活跃气氛"),
+    ("🙅 委婉拒绝", "委婉推脱或拒绝对方的请求/提议，态度真诚客气不伤和气"),
+    ("📅 预约确认", "明确确认时间、地点、日程或下一步动作安排"),
+    ("⚡ 催促进度", "礼貌询问当前具体进展，委婉提醒回复"),
+    ("🤝 赞同鼓励", "充分肯定对方观点，给予真诚支持与情绪鼓励"),
+]
+
 
 def ensure_default_desktop():
     """附着在系统的 Default 交互桌面，消除权限隔离"""
@@ -140,7 +149,7 @@ class SmoothDockTracker(QObject):
     visibilityChanged = pyqtSignal(bool)
     wechatFound = pyqtSignal(int, int)
 
-    def __init__(self, dock_width: int = 356, parent=None):
+    def __init__(self, dock_width: int = 360, parent=None):
         super().__init__(parent)
         ensure_default_desktop()
         self.dock_width = dock_width
@@ -171,7 +180,6 @@ class SmoothDockTracker(QObject):
     def find_wechat_window(self) -> Optional[Dict]:
         ensure_default_desktop()
 
-        # 1. 验证现有缓存
         if self.wechat_hwnd and user32.IsWindow(self.wechat_hwnd):
             if user32.IsWindowVisible(self.wechat_hwnd):
                 rect = win32gui.GetWindowRect(self.wechat_hwnd)
@@ -185,7 +193,6 @@ class SmoothDockTracker(QObject):
                         "is_minimized": is_min,
                     }
 
-        # 2. 全局枚举
         candidates = []
 
         def enum_cb(hwnd, _):
@@ -276,7 +283,7 @@ class SmoothDockTracker(QObject):
     ) -> Tuple[int, int, int, int, str]:
         wl, wt, wr, wb = wechat_rect
         wh = wb - wt
-        target_h = max(300, wh)
+        target_h = max(320, wh)
 
         hwnd = self.wechat_hwnd or 0
         ml, mt, mr, mb = self.get_monitor_work_area(hwnd)
@@ -299,12 +306,11 @@ class SmoothDockTracker(QObject):
         return (target_x, target_y, self.dock_width, target_h, "inside_right")
 
     def start_hook(self):
-        """安装系统事件监听钩子"""
         if self.hook:
             return
 
         def _event_proc(h_hook, event, hwnd, id_obj, id_child, thread, time_ms):
-            if id_obj != 0:  # OBJID_WINDOW
+            if id_obj != 0:
                 return
             if not self.wechat_hwnd or hwnd != self.wechat_hwnd:
                 return
@@ -404,13 +410,13 @@ class WebSocketListenerBridge(QObject):
                     await asyncio.sleep(0.1)
 
 
-class AISuggestionWorker(QThread):
+class AICopilotWorker(QThread):
     """
-    后台大模型建议生成线程
-    复用 src.core (AI 配置、人设、记忆)，一次生成 3 种微信日常回复风格
+    后台大模型建议与意图分析线程
+    深度调用 AIBrain，一次性输出「对话意图小结」+「3 种微信口吻建议」
     """
 
-    finished = pyqtSignal(list)
+    finished = pyqtSignal(dict)
     failed = pyqtSignal(str)
 
     def __init__(
@@ -426,137 +432,57 @@ class AISuggestionWorker(QThread):
         self.chat_id = chat_id
         self.chat_title = chat_title
         self.custom_instruction = custom_instruction.strip()
+        self.brain = AIBrain()
 
     def run(self):
         try:
-            cfg = load_ai_settings()
-            persona = load_persona()
-            api_key = (cfg.get("api_key") or "").strip()
-            base_url = (cfg.get("base_url") or "https://api.deepseek.com/v1").rstrip("/")
-            model = cfg.get("model") or "deepseek-chat"
-            max_words = persona.get("max_words", 100)
+            latest_text = ""
+            if self.context_msgs:
+                latest_text = self.context_msgs[-1].get("content") or ""
 
-            # 获取该会话的记忆事实画像
-            mem_mgr = MemoryManager()
-            global_facts = mem_mgr.get_global_memory().get("facts", [])
-            session_notes = mem_mgr.get_session_memory(self.chat_id).get("notes", [])
-
-            # 整理最近对话上下文
-            dialogue_text = ""
-            for m in self.context_msgs[-12:]:
-                speaker = "我" if m.get("is_from_me") else (m.get("sender_name") or self.chat_title or "对方")
-                dialogue_text += f"{speaker}: {m.get('content', '')}\n"
-
-            if not dialogue_text.strip():
-                dialogue_text = f"对方: 你好"
-
-            # 离线模拟兜底（无 API KEY 时）
-            if not api_key:
-                results = self._generate_offline_mock(dialogue_text)
-                self.finished.emit(results)
-                return
-
-            system_prompt = f"""你是「{persona.get('name', '小暖')}」，正在微信上与好友聊天。
-请根据上下文，给出 3 种不同风格的回复建议：
-1. 【得体礼貌】自然温暖、得体周全、态度诚恳；
-2. 【风趣幽默】高情商、轻松俏皮、适合熟络好友互动；
-3. 【精简高效】直奔主题、言简意赅（适合忙碌或快速确认）。
-
-【已知记忆事实】：
-- 全局常识: {', '.join(global_facts[:3]) if global_facts else '无'}
-- 对方画像: {', '.join(session_notes[:3]) if session_notes else '无'}
-
-【回复格式要求】：
-请务必严格输出 3 行，每行格式如下（不要有其他寒暄说明）：
-[得体] 回复内容（单句限{max_words}字内）
-[幽默] 回复内容（单句限{max_words}字内）
-[精简] 回复内容（单句限{max_words}字内）"""
-
-            user_prompt = f"【当前联系人】: {self.chat_title}\n【近期对话记录】:\n{dialogue_text}"
-            if self.custom_instruction:
-                user_prompt += f"\n【我的额外回复意图/要求】: {self.custom_instruction}"
-
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            }
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": float(cfg.get("temperature", 0.7)),
-                "max_tokens": int(cfg.get("max_tokens", 500)),
-            }
-
-            resp = requests.post(
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=18,
+            # 调用大模型深度多轮综合分析
+            res = self.brain.generate_copilot_analysis(
+                chat_id=self.chat_id,
+                incoming_text=latest_text,
+                sender_name=self.chat_title,
+                custom_instruction=self.custom_instruction,
+                history_messages=self.context_msgs,
             )
-
-            if resp.status_code != 200:
-                raise RuntimeError(f"API 请求失败 HTTP {resp.status_code}: {resp.text}")
-
-            res_json = resp.json()
-            content = res_json["choices"][0]["message"]["content"].strip()
-            results = self._parse_suggestions(content)
-            self.finished.emit(results)
-
+            self.finished.emit(res)
         except Exception as e:
             self.failed.emit(str(e))
 
-    def _parse_suggestions(self, text: str) -> List[Dict]:
-        items = []
-        for line in text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("[得体]") or line.startswith("【得体】"):
-                items.append({"style": "得体礼貌", "tag": "得体", "text": line[4:].strip()})
-            elif line.startswith("[幽默]") or line.startswith("【幽默】"):
-                items.append({"style": "风趣幽默", "tag": "幽默", "text": line[4:].strip()})
-            elif line.startswith("[精简]") or line.startswith("【精简】"):
-                items.append({"style": "精简高效", "tag": "精简", "text": line[4:].strip()})
-
-        if not items:
-            items.append({"style": "综合建议", "tag": "建议", "text": text})
-        return items
-
-    def _generate_offline_mock(self, dialogue: str) -> List[Dict]:
-        return [
-            {"style": "得体礼貌", "tag": "得体", "text": "好嘞，我收到啦！这会儿稍微有点忙，稍等我倒杯水马上详细回复你哈~"},
-            {"style": "风趣幽默", "tag": "幽默", "text": "哈哈哈哈笑死我了，听你这么一说我突然精神了，快坐下细细唠唠！"},
-            {"style": "精简高效", "tag": "精简", "text": "明白，没问题，马上安排！"},
-        ]
-
 
 class SuggestionCard(QFrame):
-    """单条回复建议卡片 (微信设计语言)"""
+    """单条回复建议卡片 (带快捷键标识与微信设计语言)"""
 
     sendRequested = pyqtSignal(str)
     pasteRequested = pyqtSignal(str)
     copyRequested = pyqtSignal(str)
 
-    def __init__(self, tag: str, style_name: str, text: str, parent=None):
+    def __init__(self, index: int, tag: str, style_name: str, text: str, parent=None):
         super().__init__(parent)
+        self.index = index
         self.text = text
+        self.shortcut_hint = f"Ctrl+{index + 1}"
         self.setObjectName("suggestionCard")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
 
-        # 头部标签栏
+        # 头部标签与快捷键提示
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         tag_badge = QLabel(style_name)
         tag_badge.setObjectName("styleBadge")
-        header_row.addWidget(tag_badge)
-        header_row.addStretch()
 
+        shortcut_lbl = QLabel(self.shortcut_hint)
+        shortcut_lbl.setObjectName("shortcutBadge")
+
+        header_row.addWidget(tag_badge)
+        header_row.addWidget(shortcut_lbl)
+        header_row.addStretch()
         layout.addLayout(header_row)
 
         # 建议文本
@@ -578,13 +504,13 @@ class SuggestionCard(QFrame):
 
         self.paste_btn = QPushButton("填入微信")
         self.paste_btn.setObjectName("btnGhost")
-        self.paste_btn.setToolTip("填入微信输入框，供人工修改核对")
+        self.paste_btn.setToolTip("填入微信输入框，供人工核对修改")
         self.paste_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.paste_btn.clicked.connect(lambda: self.pasteRequested.emit(self.text))
 
-        self.send_btn = QPushButton("一键发送")
+        self.send_btn = QPushButton(f"一键发送 ({self.shortcut_hint})")
         self.send_btn.setObjectName("btnPrimary")
-        self.send_btn.setToolTip("自动置顶微信并执行多气泡模拟发送")
+        self.send_btn.setToolTip(f"快捷键 {self.shortcut_hint} 直接发送至当前微信窗口")
         self.send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.send_btn.clicked.connect(lambda: self.sendRequested.emit(self.text))
 
@@ -601,25 +527,27 @@ class WeChatCopilotDock(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.dock_width = 356
+        self.dock_width = 360
         self.is_pinned = True
         self.current_session: Optional[Dict] = None
         self.sessions_cache: List[Dict] = []
         self.recent_messages: List[Dict] = []
+        self.current_suggestions: List[Dict] = []
 
         self.sender = MessageSender()
         self.tracker = SmoothDockTracker(dock_width=self.dock_width, parent=self)
 
         self.init_window_flags()
         self.init_ui()
+        self.init_shortcuts()
         self.init_styles()
         self.init_signals()
 
-        # 启动窗口寻址与毫秒级吸附
+        # 启动窗口寻址与吸附
         self.bootstrap_tracker()
 
         # 初始加载会话
-        QTimer.singleShot(500, self.refresh_sessions_list)
+        QTimer.singleShot(400, self.refresh_sessions_list)
 
         # 启动 WebSocket 实时长连
         self.ws_bridge = WebSocketListenerBridge(self)
@@ -636,7 +564,13 @@ class WeChatCopilotDock(QWidget):
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        self.resize(self.dock_width, 680)
+        self.resize(self.dock_width, 700)
+
+    def init_shortcuts(self):
+        """配置 Ctrl+1 / Ctrl+2 / Ctrl+3 极速盲操发送快捷键"""
+        QShortcut(QKeySequence("Ctrl+1"), self, lambda: self.send_suggestion_by_index(0))
+        QShortcut(QKeySequence("Ctrl+2"), self, lambda: self.send_suggestion_by_index(1))
+        QShortcut(QKeySequence("Ctrl+3"), self, lambda: self.send_suggestion_by_index(2))
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -711,7 +645,6 @@ class WeChatCopilotDock(QWidget):
         self.session_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.session_combo.lineEdit().setPlaceholderText("🔍 输入拼音、好友名或群聊名过滤...")
 
-        # 配置实时模糊搜索 Completer
         comp = self.session_combo.completer()
         if comp:
             comp.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -723,18 +656,18 @@ class WeChatCopilotDock(QWidget):
 
         main_layout.addWidget(search_card)
 
-        # 3. 当前对话上文卡片
+        # 3. 当前对话上文与意图洞察卡片
         context_card = QFrame()
         context_card.setObjectName("contextCard")
         ctx_layout = QVBoxLayout(context_card)
         ctx_layout.setContentsMargins(12, 8, 12, 8)
-        ctx_layout.setSpacing(4)
+        ctx_layout.setSpacing(6)
 
         ctx_top = QHBoxLayout()
         self.target_name_lbl = QLabel("未选定会话")
         self.target_name_lbl.setObjectName("targetNameLbl")
 
-        self.msg_count_lbl = QLabel("参考近 15 条记录")
+        self.msg_count_lbl = QLabel("已注入近 15 条上下文")
         self.msg_count_lbl.setObjectName("msgCountLbl")
 
         ctx_top.addWidget(self.target_name_lbl)
@@ -742,6 +675,24 @@ class WeChatCopilotDock(QWidget):
         ctx_top.addWidget(self.msg_count_lbl)
         ctx_layout.addLayout(ctx_top)
 
+        # 意图洞察高亮条
+        self.intent_card = QFrame()
+        self.intent_card.setObjectName("intentCard")
+        intent_layout = QHBoxLayout(self.intent_card)
+        intent_layout.setContentsMargins(8, 6, 8, 6)
+        intent_layout.setSpacing(6)
+
+        self.intent_icon = QLabel("💡")
+        self.intent_icon.setObjectName("intentIcon")
+        self.intent_lbl = QLabel("意图洞察: 正在解析多轮上下文...")
+        self.intent_lbl.setObjectName("intentLbl")
+        self.intent_lbl.setWordWrap(True)
+
+        intent_layout.addWidget(self.intent_icon)
+        intent_layout.addWidget(self.intent_lbl, 1)
+        ctx_layout.addWidget(self.intent_card)
+
+        # 最新一条消息气泡预览
         self.last_msg_box = QLabel("暂无消息记录")
         self.last_msg_box.setObjectName("lastMsgBox")
         self.last_msg_box.setWordWrap(True)
@@ -764,13 +715,38 @@ class WeChatCopilotDock(QWidget):
         scroll.setWidget(self.cards_container)
         main_layout.addWidget(scroll, 1)
 
-        # 5. 底部输入与重新生成区 (微信输入工具栏风)
+        # 5. 底部输入与重新生成区 (包含快捷意图胶囊)
         bottom_bar = QFrame()
         bottom_bar.setObjectName("bottomBar")
         bot_layout = QVBoxLayout(bottom_bar)
         bot_layout.setContentsMargins(12, 8, 12, 10)
-        bot_layout.setSpacing(8)
+        bot_layout.setSpacing(6)
 
+        # 快捷意图微调胶囊滚动区
+        chips_scroll = QScrollArea()
+        chips_scroll.setWidgetResizable(True)
+        chips_scroll.setFixedHeight(34)
+        chips_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        chips_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        chips_scroll.setObjectName("chipsScroll")
+
+        chips_container = QWidget()
+        chips_layout = QHBoxLayout(chips_container)
+        chips_layout.setContentsMargins(0, 2, 0, 2)
+        chips_layout.setSpacing(6)
+
+        for label, prompt in PRESET_CHIPS:
+            btn = QPushButton(label)
+            btn.setObjectName("chipBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda checked, p=prompt: self.trigger_generation_with_chip(p))
+            chips_layout.addWidget(btn)
+
+        chips_layout.addStretch()
+        chips_scroll.setWidget(chips_container)
+        bot_layout.addWidget(chips_scroll)
+
+        # 自定义指令输入框
         self.instruct_input = QLineEdit()
         self.instruct_input.setObjectName("instructInput")
         self.instruct_input.setPlaceholderText("微调回复要求（如：婉拒对方、约明天下午...）")
@@ -875,7 +851,21 @@ class WeChatCopilotDock(QWidget):
             }
             #msgCountLbl {
                 font-size: 10px;
-                color: #999999;
+                color: #888888;
+            }
+            #intentCard {
+                background-color: #f0faf3;
+                border: 1px solid #d4eedb;
+                border-radius: 6px;
+            }
+            #intentIcon {
+                font-size: 12px;
+            }
+            #intentLbl {
+                font-size: 11px;
+                color: #0a5828;
+                font-weight: 500;
+                line-height: 1.35;
             }
             #lastMsgBox {
                 background-color: #ffffff;
@@ -906,6 +896,15 @@ class WeChatCopilotDock(QWidget):
                 background-color: #edf9f2;
                 padding: 1px 6px;
                 border-radius: 3px;
+            }
+            #shortcutBadge {
+                font-size: 9px;
+                font-family: monospace;
+                color: #888888;
+                background-color: #f0f0f0;
+                padding: 1px 5px;
+                border-radius: 3px;
+                border: 1px solid #e2e2e2;
             }
             #cardContent {
                 font-size: 12px;
@@ -944,6 +943,27 @@ class WeChatCopilotDock(QWidget):
                 background-color: #ffffff;
                 border-top: 1px solid #e5e5e5;
             }
+            #chipsScroll {
+                background: transparent;
+                border: none;
+            }
+            #chipBtn {
+                background-color: #f2f2f2;
+                color: #444444;
+                border: 1px solid #e0e0e0;
+                border-radius: 12px;
+                padding: 3px 8px;
+                font-size: 10px;
+            }
+            #chipBtn:hover {
+                background-color: #e8f7ee;
+                border-color: #b7e6c6;
+                color: #07c160;
+            }
+            #chipBtn:pressed {
+                background-color: #07c160;
+                color: #ffffff;
+            }
             #instructInput {
                 background-color: #f5f5f5;
                 border: 1px solid #e0e0e0;
@@ -976,7 +996,6 @@ class WeChatCopilotDock(QWidget):
             self.status_dot.setStyleSheet("color: #999999;")
             self.title_lbl.setText("微信 AI 副驾驶 (等待微信...)")
 
-        # 定时自愈心跳（120ms 检查微信是否重新启动或句柄更迭）
         self.heartbeat_timer = QTimer(self)
         self.heartbeat_timer.timeout.connect(self.on_heartbeat)
         self.heartbeat_timer.start(120)
@@ -999,7 +1018,6 @@ class WeChatCopilotDock(QWidget):
                 if self.isVisible():
                     self.hide()
         else:
-            # 检查最小化
             is_min = bool(user32.IsIconic(self.tracker.wechat_hwnd))
             if is_min and self.isVisible():
                 self.hide()
@@ -1010,7 +1028,6 @@ class WeChatCopilotDock(QWidget):
                 self.show()
 
     def on_dock_location_changed(self, x: int, y: int, w: int, h: int, mode: str):
-        """位置改变时调用硬件级 SetWindowPos 零延迟吸附"""
         self.apply_geometry_smooth(x, y, w, h)
 
     def on_dock_visibility_changed(self, visible: bool):
@@ -1025,11 +1042,8 @@ class WeChatCopilotDock(QWidget):
         hwnd = int(self.winId())
         curr = self.geometry()
         flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING
-
-        # 如果宽高一致则不重设尺寸，加速 DWM 绘制
         if curr.width() == w and curr.height() == h:
             flags |= SWP_NOSIZE
-
         user32.SetWindowPos(hwnd, 0, x, y, w, h, flags)
 
     def toggle_pin(self):
@@ -1051,12 +1065,10 @@ class WeChatCopilotDock(QWidget):
             self.backend_badge.setStyleSheet("color: #888888; background-color: #eeeeee; border: 1px solid #dddddd;")
 
     def on_ws_message_received(self, msg: Dict):
-        """收到 WebSocket 推送的微信新消息"""
         chat_id = msg.get("chat_id") or msg.get("username")
         if not chat_id:
             return
 
-        # 若为当前选定会话
         if self.current_session and self.current_session.get("username") == chat_id:
             spk = "我" if msg.get("is_from_me") else (msg.get("sender_name") or "对方")
             self.last_msg_box.setText(f"{spk}: {msg.get('content', '...')}")
@@ -1064,7 +1076,6 @@ class WeChatCopilotDock(QWidget):
             if self.auto_toggle.isChecked() and not msg.get("is_from_me"):
                 self.trigger_generation()
         else:
-            # 更新下拉项显示
             for i in range(self.session_combo.count()):
                 d = self.session_combo.itemData(i)
                 if d and d.get("username") == chat_id:
@@ -1074,7 +1085,6 @@ class WeChatCopilotDock(QWidget):
                     break
 
     def refresh_sessions_list(self):
-        """优先从运行中的 Web 服务拉取会话列表，离线时直接读本地数据"""
         try:
             resp = requests.get("http://127.0.0.1:8000/api/sessions", timeout=1.0)
             if resp.status_code == 200:
@@ -1084,7 +1094,6 @@ class WeChatCopilotDock(QWidget):
         except Exception:
             pass
 
-        # 离线模拟/缓存会话
         mock_sessions = [
             {"username": "filehelper", "title": "文件传输助手", "is_group": False, "latest_msg": "欢迎使用微信 AI 对话副驾驶"},
         ]
@@ -1100,7 +1109,6 @@ class WeChatCopilotDock(QWidget):
             prefix = "👥 " if s.get("is_group") else "👤 "
             self.session_combo.addItem(f"{prefix}{title}", s)
 
-        # 重新配置 Completer 保持包含模糊匹配
         comp = self.session_combo.completer()
         if comp:
             comp.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -1120,7 +1128,6 @@ class WeChatCopilotDock(QWidget):
         title = data.get("title") or data.get("username")
         self.target_name_lbl.setText(f"{'👥 群聊: ' if data.get('is_group') else '👤 好友: '}{title}")
 
-        # 拉取该会话近 15 条消息
         self.load_session_context(data.get("username", ""))
 
     def load_session_context(self, chat_id: str):
@@ -1130,12 +1137,13 @@ class WeChatCopilotDock(QWidget):
         try:
             resp = requests.get(
                 "http://127.0.0.1:8000/api/messages",
-                params={"username": chat_id, "limit": 15},
+                params={"username": chat_id, "limit": 20},
                 timeout=1.0,
             )
             if resp.status_code == 200:
                 msgs = resp.json().get("data", [])
                 self.recent_messages = msgs
+                self.msg_count_lbl.setText(f"已注入近 {len(msgs)} 条多轮上下文")
                 if msgs:
                     latest = msgs[-1]
                     spk = "我" if latest.get("is_from_me") else (latest.get("sender_name") or "对方")
@@ -1149,7 +1157,6 @@ class WeChatCopilotDock(QWidget):
         except Exception:
             pass
 
-        # 离线兜底
         self.recent_messages = [
             {"is_from_me": False, "sender_name": "对方", "content": self.current_session.get("latest_msg", "你好呀")}
         ]
@@ -1163,18 +1170,24 @@ class WeChatCopilotDock(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+    def trigger_generation_with_chip(self, chip_prompt: str):
+        """点击快捷意图微调胶囊，立即一键重新生成"""
+        self.instruct_input.setText(chip_prompt)
+        self.trigger_generation()
+
     def trigger_generation(self):
         if not self.current_session:
             return
 
         self.gen_btn.setEnabled(False)
-        self.gen_btn.setText("生成中...")
-        instruction = self.instruct_input.text().strip()
+        self.gen_btn.setText("分析总结中...")
+        self.intent_lbl.setText("💡 意图洞察: 正在深度分析上下文并生成多风格回复...")
 
+        instruction = self.instruct_input.text().strip()
         chat_id = self.current_session.get("username", "")
         chat_title = self.current_session.get("title") or chat_id
 
-        self.worker = AISuggestionWorker(
+        self.worker = AICopilotWorker(
             context_msgs=self.recent_messages,
             chat_id=chat_id,
             chat_title=chat_title,
@@ -1185,13 +1198,22 @@ class WeChatCopilotDock(QWidget):
         self.worker.failed.connect(self.on_generation_failed)
         self.worker.start()
 
-    def on_generation_finished(self, suggestions: List[Dict]):
+    def on_generation_finished(self, result: Dict):
         self.gen_btn.setEnabled(True)
         self.gen_btn.setText("✨ 生成回复建议")
         self.clear_cards()
 
-        for s in suggestions:
+        # 1. 更新意图洞察
+        intent_text = result.get("intent") or "日常友好交流"
+        self.intent_lbl.setText(f"意图洞察: {intent_text}")
+
+        # 2. 渲染 3 种建议卡片
+        suggestions = result.get("suggestions", [])
+        self.current_suggestions = suggestions
+
+        for idx, s in enumerate(suggestions):
             card = SuggestionCard(
+                index=idx,
                 tag=s.get("tag", "建议"),
                 style_name=s.get("style", "智能建议"),
                 text=s.get("text", ""),
@@ -1205,10 +1227,18 @@ class WeChatCopilotDock(QWidget):
     def on_generation_failed(self, error_msg: str):
         self.gen_btn.setEnabled(True)
         self.gen_btn.setText("✨ 生成回复建议")
+        self.intent_lbl.setText("💡 意图洞察: 生成建议异常")
         QMessageBox.warning(self, "AI 生成失败", f"大模型接口调用异常: {error_msg}")
 
+    def send_suggestion_by_index(self, index: int):
+        """Ctrl+1 / Ctrl+2 / Ctrl+3 快捷键极速发送"""
+        if not self.current_suggestions or index >= len(self.current_suggestions):
+            return
+        text = self.current_suggestions[index].get("text", "")
+        if text:
+            self.handle_send_request(text)
+
     def handle_send_request(self, text: str):
-        """一键置顶微信并执行多气泡模拟发送"""
         if not self.current_session:
             return
         title = self.current_session.get("title") or self.current_session.get("username")
@@ -1217,7 +1247,6 @@ class WeChatCopilotDock(QWidget):
             QMessageBox.warning(self, "发送遇到异常", msg)
 
     def handle_paste_request(self, text: str):
-        """置顶微信并填入输入框，不执行发送"""
         if not self.current_session:
             return
         title = self.current_session.get("title") or self.current_session.get("username")
@@ -1226,7 +1255,6 @@ class WeChatCopilotDock(QWidget):
             QMessageBox.warning(self, "填入遇到异常", msg)
 
     def handle_copy_request(self, text: str):
-        """复制到剪贴板"""
         QApplication.clipboard().setText(text)
 
     def closeEvent(self, event):
