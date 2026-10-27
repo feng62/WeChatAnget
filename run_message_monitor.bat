@@ -7,7 +7,6 @@ echo   微信 4.x 多账号并发消息读取与媒体处理演示
 echo ========================================================
 echo.
 
-rem 优先使用已配置好完整依赖环境的 Python 路径
 set "PY=D:\Tool\python\python.exe"
 if not exist "%PY%" set "PY=D:\Program\python\python3.14\python.exe"
 if not exist "%PY%" set "PY=%~dp0..\whale_gril\runtime\python\python.exe"
